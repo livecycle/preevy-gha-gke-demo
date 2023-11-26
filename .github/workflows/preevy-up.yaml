@@ -8,36 +8,188 @@ on:
 permissions:
   id-token: write
   contents: read
+  packages: write
   pull-requests: write
-concurrency: preevy-${{ github.event.number }}
 jobs:
   deploy:
+    timeout-minutes: 25
+    # concurrency: preevy-${{ github.event.number }}
+    strategy:
+      fail-fast: false
+      matrix:
+        builder: ['', 'docker-container']
+        registry: ['', 'ghcr', 'gar']
+        gh-cache: ['', 'ghcache']
+        exclude:
+          - builder: ''
+            gh-cache: 'ghcache'
+          - builder: ''
+            registry: 'gar'
+          - builder: ''
+            registry: 'ghcr'
+
     environment:
       name: pr-${{ github.event.number }}
-      url: ${{ steps.store_url.outputs.url }}
+      # url: ${{ steps.store_url.outputs.url }}
 
     env:
       GITHUB_TOKEN: ${{ github.token }}
+      PREEVY_TELEMETRY_FILE: ./preevy-events.json
+      SPREADSHEET_ID: 1XxoESmMi8gXpNy0rrGsH6eWBtI6L5EN7TVV8aYEvtf0
+      SPREADSHEET_TITLE: Sheet1
+      USE_PREEVY_VERSION: 0.0.57-split-build.50a7c96
 
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
+      - id: start_time
+        run: |
+          echo "time=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" >> ${GITHUB_OUTPUT}
+
       - name: 'Authenticate to Google Cloud'
+        id: auth
         uses: 'google-github-actions/auth@v1'
         with:
+          token_format: access_token
           credentials_json: '${{ secrets.PREEVY_SA_KEY }}'
 
-      - uses: livecycle/preevy-up-action@v1.2.0
+      - name: Set up Docker Buildx
+        if: ${{ matrix.builder == 'docker-container' }}
+        id: buildx_setup
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GAR
+        if: ${{ matrix.registry == 'gar' }}
+        uses: docker/login-action@v3
+        with:
+          registry: me-west1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      -
+        name: Login to GitHub Container Registry
+        if: ${{ matrix.registry == 'ghcr' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      -
+        name: Expose GitHub Runtime
+        uses: crazy-max/ghaction-github-runtime@v3
+        if: ${{ matrix.gh-cache }}
+
+      - name: Cache frontend-npm-cache
+        uses: actions/cache@v3
+        if: ${{ matrix.gh-cache }}
+        with:
+          path: frontend-npm-cache
+          key: frontend-npm-cache-${{ hashFiles('frontend/Dockerfile') }}
+
+      - name: Cache backend-npm-cache
+        uses: actions/cache@v3
+        if: ${{ matrix.gh-cache }}
+        with:
+          path: backend-npm-cache
+          key: backend-npm-cache-${{ hashFiles('backend/Dockerfile') }}
+
+      - name: inject frontend-npm-cache into docker
+        uses: reproducible-containers/buildkit-cache-dance@v2.1.3
+        if: ${{ matrix.gh-cache }}
+        with:
+          cache-source: frontend-npm-cache
+          cache-target: /cache/npm/frontend
+
+      - name: inject backend-npm-cache into docker
+        uses: reproducible-containers/buildkit-cache-dance@v2.1.3
+        if: ${{ matrix.gh-cache }}
+        with:
+          cache-source: backend-npm-cache
+          cache-target: /cache/npm/backend
+
+      - id: setup_end_time
+        run: |
+          echo "time=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" >> ${GITHUB_OUTPUT}
+
+      - id: calc_preevy_up_args
+        run: |
+          function normalize() {
+            echo "$1" | sed -E 's/[^a-zA-Z0-9_-]/-/g' | sed -E 's/--+/-/g' | sed -E 's/^-*//' | sed -E 's/-*$//'
+          }
+
+          env_id=$(normalize "gce-test-${{ join(matrix.*, '-') }}")
+          echo "env_id=${env_id}" >> ${GITHUB_OUTPUT}
+
+          args="--id ${env_id} --gce-machine-type e2-small"
+          if [[ ! -z "${{ matrix.registry }}" ]]; then
+            if [[ "${{ matrix.registry }}" == "ghcr" ]]; then
+              registry="ghcr.io/livecycle"
+            else
+              registry="me-west1-docker.pkg.dev/livecycle-dev/preevy-gce-demo"
+            fi
+
+            args="${args} --registry ${registry} --registry-single-name $(normalize build-perf-test-${{ matrix.gh-cache }})"
+          fi
+
+          if [[ "${{ matrix.builder }}" == "docker-container" ]]; then
+            args="${args} --builder ${{ steps.buildx_setup.outputs.name }}"
+          fi
+
+          if [[ ! -z "${{ matrix.gh-cache }}" ]]; then
+            args="${args} --github-add-build-cache"
+          fi
+
+          echo "args: ${args}"
+          echo "args=${args}" >> ${GITHUB_OUTPUT}
+
+      - uses: livecycle/preevy-up-action@c48937f4f4f5243e5f74724e2c4e89478b08ef57
         id: preevy_up
         with:
           profile-url: ${{ vars.PREEVY_PROFILE_URL }}
-          # Set the compose files - comma separated
-          docker-compose-yaml-paths: compose.yaml
+          version: ${{ env.USE_PREEVY_VERSION }}
+          args: ${{ steps.calc_preevy_up_args.outputs.args }}
 
-      # Change `frontend` and `3000` in this step to your main service and port
-      # This will appear as the GH environment URL
-      - id: store_url
-        name: Store URL of frontend
-        run: |
-          echo url=$(echo '${{ steps.preevy_up.outputs.urls-json }}' | jq -r '.[] | select(.service=="frontend" and .port==3000).url') >> "$GITHUB_OUTPUT"
+      - uses: actions/github-script@v7
+        id: extract_worksheet_row
+        with:
+          result-encoding: string
+          debug: true
+          script: |
+            const fs = require('fs')
+
+            const events = fs.readFileSync('${{ env.PREEVY_TELEMETRY_FILE }}', 'utf-8').split('\n').filter(Boolean).map(JSON.parse)
+            const buildEvent = events.find(({ event }) => event === 'build success')?.properties
+            const provisionEvent = events.find(({ event }) => event === 'deploy success')?.properties
+
+            const setupTimeSec = (new Date('${{ steps.setup_end_time.outputs.time }}') - new Date('${{ steps.start_time.outputs.time }}')) / 1000
+
+            return JSON.stringify([
+              ${{ github.run_number }},
+              ${{ github.run_attempt }},
+              ${{ github.run_id }},
+              (new Date()).toISOString(),
+              "${{ steps.calc_preevy_up_args.outputs.env_id }}",
+              "${{ matrix.registry }}",
+              "${{ matrix.builder }}",
+              "${{ matrix.gh-cache }}",
+              Math.round(setupTimeSec),
+              Math.round(buildEvent?.elapsed_sec),
+              Math.round(provisionEvent?.elapsed_sec),
+              Math.round((buildEvent?.elapsed_sec ?? 0) + (provisionEvent?.elapsed_sec ?? 0) + setupTimeSec),
+            ])
+
+      - id: update_worksheet
+        uses: jroehl/gsheet.action@v2.1.1 # you can specify '@release' to always have the latest changes
+        with:
+          spreadsheetId: ${{ env.SPREADSHEET_ID }}
+          commands: | # list of commands, specified as a valid JSON string
+            [
+              { "command": "getWorksheet", "args": { "worksheetTitle": "${{ env.SPREADSHEET_TITLE }}" } },
+              { "command": "appendData", "args": { "minCol": 1, "data": [${{ steps.extract_worksheet_row.outputs.result }}] } }
+            ]
+        env:
+          GSHEET_CLIENT_EMAIL: ${{ fromJson(secrets.PREEVY_SA_KEY).client_email }}
+          GSHEET_PRIVATE_KEY: ${{ fromJson(secrets.PREEVY_SA_KEY).private_key }}
+
