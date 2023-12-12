@@ -45,7 +45,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: livecycle/preevy-up-action@v2.0.0
+      - uses: livecycle/preevy-up-action@d3b4aa423202ba8df3c45493781a84f476fb1084
         id: preevy_up
         with:
           profile-url: ${{ vars.PREEVY_PROFILE_URL }}

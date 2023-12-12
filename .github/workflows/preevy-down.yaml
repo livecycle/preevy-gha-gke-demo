@@ -22,7 +22,7 @@ jobs:
         with:
           credentials_json: '${{ secrets.PREEVY_SA_KEY }}'
 
-      - uses: livecycle/preevy-down-action@latest
+      - uses: livecycle/preevy-down-action@194daaece6e8a2f849d0a0ef82c48f1804b07229
         with:
           profile-url: ${{ vars.PREEVY_PROFILE_URL }}
           args: "--wait --force"
@@ -35,17 +35,17 @@ jobs:
       #
 
       # Points to a recent commit instead of `main` to avoid supply chain attacks. (The latest tag is very old.)
-      - name: 🎟 Get GitHub App token
-        uses: navikt/github-app-token-generator@a3831f44404199df32d8f39f7c0ad9bb8fa18b1c
-        id: get-token
-        with:
-          app-id: ${{ vars.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      # - name: 🎟 Get GitHub App token
+      #   uses: navikt/github-app-token-generator@a3831f44404199df32d8f39f7c0ad9bb8fa18b1c
+      #   id: get-token
+      #   with:
+      #     app-id: ${{ vars.GH_APP_ID }}
+      #     private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - name: 🗑 Delete deployment environment
-        uses: strumwolf/delete-deployment-environment@v2.2.3
-        with:
-          # Use a JWT created with your GitHub App's private key
-          token: ${{ steps.get-token.outputs.token }}
-          environment: pr-${{ github.event.number }}
-          ref: ${{ github.ref_name }}
+      # - name: 🗑 Delete deployment environment
+      #   uses: strumwolf/delete-deployment-environment@v2.2.3
+      #   with:
+      #     # Use a JWT created with your GitHub App's private key
+      #     token: ${{ steps.get-token.outputs.token }}
+      #     environment: pr-${{ github.event.number }}
+      #     ref: ${{ github.ref_name }}
